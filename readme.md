@@ -1,4 +1,4 @@
-# 🌾 IndicAgri-Stream
+# 🌾IndicAgri-Stream
 > **Real-time, event-driven agricultural intelligence pipeline for smallholder farmers**  
 `[Pub/Sub Architecture]` `[Event-Driven]` `[AWS-Ready]` `[Indic NLP]` `[Production-Grade DE]`
 
