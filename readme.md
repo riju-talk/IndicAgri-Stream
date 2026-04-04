@@ -170,6 +170,6 @@ curl http://localhost:8000/plot/WB_MUR_042/status | jq
 ## 📜 License
 
 MIT © Rijusmit Biswas. Built for impact, open for collaboration.  
-`📧 rijusmit2280@iitd.ac.in` | `🐙 github.com/riju-talk` | `💼 linkedin.com/in/rijusmit-biswas`
+`📧 rijusmit.biswas@gmail.com` | `🐙 github.com/riju-talk` | `💼 linkedin.com/in/rijusmit-biswas`
 
 ---
