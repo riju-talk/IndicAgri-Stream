@@ -1,0 +1,51 @@
+name: Data Quality
+
+on:
+  pull_request:
+    paths:
+      - ml/**
+      - dags/**
+      - schemas/**
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install Great Expectations dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install great_expectations pandas psycopg2-binary sqlalchemy
+
+      - name: Run Great Expectations checkpoint
+        env:
+          GE_CONN_STRING: ${{ secrets.GE_CONN_STRING || 'postgresql+psycopg2://agri_user:agri_pass@localhost:5432/agri_features' }}
+        run: |
+          if [ ! -d great_expectations ] && [ ! -d ge_expectations ]; then
+            echo "Great Expectations config directory not found. Skipping validation."
+            exit 0
+          fi
+
+          ge checkpoint run agri_quality_suite --details
+
+      - name: Upload GE report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ge-report
+          path: |
+            great_expectations/uncommitted/data_docs/**
+            ge_expectations/*.html
+          if-no-files-found: ignore

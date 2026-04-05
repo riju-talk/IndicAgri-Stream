@@ -6,7 +6,7 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![Docker](https://img.shields.io/badge/docker-%230db7ed.svg?style=flat&logo=docker&logoColor=white)](https://www.docker.com/)
 [![AWS Ready](https://img.shields.io/badge/AWS-Ready-FF9900?logo=amazon-aws&logoColor=white)](https://aws.amazon.com/)
-[![CI/CD](https://github.com/yourname/indicagri-stream/actions/workflows/ci.yml/badge.svg)](https://github.com/yourname/indicagri-stream/actions)
+[![CI/CD](https://github.com/riju-talk/indicagri-stream/actions/workflows/ci.yml/badge.svg)](https://github.com/riju-ralk/indicagri-stream/actions)
 
 ---
 

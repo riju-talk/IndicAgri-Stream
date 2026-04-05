@@ -1,0 +1,145 @@
+name: IaC
+
+on:
+  pull_request:
+    paths:
+      - infra/terraform/**
+  push:
+    branches: [main]
+    paths:
+      - infra/terraform/**
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        type: choice
+        options:
+          - staging
+          - prod
+        default: staging
+        required: true
+      apply:
+        description: Apply infrastructure changes
+        type: boolean
+        default: false
+        required: true
+
+jobs:
+  terraform-plan:
+    runs-on: ubuntu-latest
+    env:
+      AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: infra/terraform
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials with OIDC
+        if: ${{ env.AWS_ROLE_ARN != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'ap-south-1' }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Detect Terraform files
+        id: tf
+        run: |
+          if find . -name "*.tf" -print -quit | grep -q .; then
+            echo "has_tf=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_tf=false" >> "$GITHUB_OUTPUT"
+            echo "No Terraform files found in infra/terraform. Skipping."
+          fi
+
+      - name: Terraform fmt
+        if: ${{ steps.tf.outputs.has_tf == 'true' }}
+        run: terraform fmt -check -recursive
+
+      - name: Terraform init
+        if: ${{ steps.tf.outputs.has_tf == 'true' }}
+        run: terraform init -input=false
+
+      - name: Terraform validate
+        if: ${{ steps.tf.outputs.has_tf == 'true' }}
+        run: terraform validate
+
+      - name: Checkov scan
+        if: ${{ steps.tf.outputs.has_tf == 'true' }}
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: infra/terraform
+          framework: terraform
+          quiet: true
+          hard_fail_on: HIGH,CRITICAL
+          output_format: cli,sarif
+          output_file_path: console,infra/terraform/checkov.sarif
+
+      - name: Terraform plan
+        if: ${{ steps.tf.outputs.has_tf == 'true' }}
+        run: terraform plan -out=tfplan
+
+      - name: Upload terraform plan
+        if: ${{ steps.tf.outputs.has_tf == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: infra/terraform/tfplan
+
+      - name: Upload Checkov report
+        if: ${{ always() && steps.tf.outputs.has_tf == 'true' }}
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: infra/terraform/checkov.sarif
+
+  terraform-apply:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.apply == 'true' }}
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: infra/terraform
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials with OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'ap-south-1' }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Detect Terraform files
+        id: tf
+        run: |
+          if find . -name "*.tf" -print -quit | grep -q .; then
+            echo "has_tf=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_tf=false" >> "$GITHUB_OUTPUT"
+            echo "No Terraform files found in infra/terraform. Skipping apply."
+          fi
+
+      - name: Terraform init
+        if: ${{ steps.tf.outputs.has_tf == 'true' }}
+        run: terraform init -input=false
+
+      - name: Terraform plan for apply
+        if: ${{ steps.tf.outputs.has_tf == 'true' }}
+        run: terraform plan -out=tfplan
+
+      - name: Terraform apply
+        if: ${{ steps.tf.outputs.has_tf == 'true' }}
+        run: terraform apply -auto-approve tfplan

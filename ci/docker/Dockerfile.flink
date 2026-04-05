@@ -1,0 +1,26 @@
+FROM apache/flink:1.18-scala_2.12-java11 AS base
+
+ENV PYTHON=/usr/bin/python3 \
+	PYFLINK_CLIENT_EXECUTION_MODE=remote \
+	FLINK_HOME=/opt/flink
+
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends \
+	python3 python3-pip python3-venv && \
+	rm -rf /var/lib/apt/lists/*
+
+WORKDIR ${FLINK_HOME}
+COPY flink/requirements.txt requirements.txt
+RUN python3 -m venv /opt/flink/pyflink-venv && \
+	/opt/flink/pyflink-venv/bin/pip install --no-cache-dir --upgrade pip && \
+	/opt/flink/pyflink-venv/bin/pip install --no-cache-dir -r requirements.txt
+
+COPY flink/ ./jobs/
+COPY scripts/flink-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh && \
+	chown -R flink:flink /opt/flink /docker-entrypoint.sh
+
+USER flink
+EXPOSE 8081
+ENTRYPOINT ["/docker-entrypoint.sh"]
+CMD ["help"]

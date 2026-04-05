@@ -1,0 +1,33 @@
+# Stage 1: Builder installs dependencies in an isolated prefix.
+FROM python:3.10-slim AS builder
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+	PYTHONUNBUFFERED=1 \
+	PIP_NO_CACHE_DIR=1
+
+WORKDIR /build
+COPY api/requirements.txt requirements.txt
+RUN python -m pip install --upgrade pip && \
+	pip install --prefix=/install -r requirements.txt
+
+# Stage 2: Runtime image keeps only runtime deps and app code.
+FROM python:3.10-slim AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+	PYTHONUNBUFFERED=1
+
+WORKDIR /app
+COPY --from=builder /install /usr/local
+COPY api/ /app
+COPY schemas/ /schemas
+
+RUN addgroup --system appgroup && \
+	adduser --system appuser --ingroup appgroup && \
+	chown -R appuser:appgroup /app /schemas
+USER appuser
+
+EXPOSE 8000
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+  CMD python -c "import sys, urllib.request; urllib.request.urlopen('http://localhost:8000/health'); sys.exit(0)" || exit 1
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]

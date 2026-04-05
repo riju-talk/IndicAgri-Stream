@@ -1,0 +1,125 @@
+name: CD
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    branches: [main]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target deployment environment
+        type: choice
+        options:
+          - staging
+          - prod
+        default: staging
+        required: true
+
+env:
+  GHCR_REGISTRY: ghcr.io
+  GHCR_NAMESPACE: ghcr.io/${{ github.repository }}
+
+jobs:
+  deploy:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'staging' }}
+    env:
+      SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+    permissions:
+      id-token: write
+      contents: read
+      packages: read
+    concurrency:
+      group: deploy-${{ github.event.inputs.environment || 'staging' }}
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve deployment metadata
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            echo "IMAGE_TAG=${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_ENV"
+          else
+            echo "IMAGE_TAG=${{ github.sha }}" >> "$GITHUB_ENV"
+          fi
+
+          if [ -n "${{ github.event.inputs.environment }}" ]; then
+            echo "TARGET_ENV=${{ github.event.inputs.environment }}" >> "$GITHUB_ENV"
+          else
+            echo "TARGET_ENV=staging" >> "$GITHUB_ENV"
+          fi
+
+      - name: Configure AWS credentials with OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'ap-south-1' }}
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.GHCR_REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to ECR
+        run: |
+          aws ecr get-login-password --region "${{ vars.AWS_REGION || 'ap-south-1' }}" | \
+            docker login --username AWS --password-stdin "${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION || 'ap-south-1' }}.amazonaws.com"
+
+      - name: Promote API image GHCR to ECR
+        if: ${{ hashFiles('api/**') != '' }}
+        run: |
+          SOURCE_IMAGE="${{ env.GHCR_NAMESPACE }}/api:${IMAGE_TAG}"
+          TARGET_IMAGE="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION || 'ap-south-1' }}.amazonaws.com/indicagri-api:${IMAGE_TAG}"
+
+          docker pull "${SOURCE_IMAGE}"
+          docker tag "${SOURCE_IMAGE}" "${TARGET_IMAGE}"
+          docker push "${TARGET_IMAGE}"
+
+          echo "TARGET_IMAGE=${TARGET_IMAGE}" >> "$GITHUB_ENV"
+
+      - name: Deploy FastAPI service on ECS
+        if: ${{ hashFiles('api/**') != '' && vars.ECS_CLUSTER != '' && vars.ECS_SERVICE != '' }}
+        run: |
+          aws ecs update-service \
+            --cluster "${{ vars.ECS_CLUSTER }}" \
+            --service "${{ vars.ECS_SERVICE }}" \
+            --force-new-deployment
+
+      - name: Sync Airflow DAGs to MWAA S3 bucket
+        if: ${{ hashFiles('dags/**') != '' && vars.MWAA_DAGS_BUCKET != '' }}
+        run: aws s3 sync dags/ "s3://${{ vars.MWAA_DAGS_BUCKET }}/dags/" --delete
+
+      - name: Sync Flink artifacts and start KDA app
+        if: ${{ hashFiles('flink/**') != '' && vars.FLINK_ARTIFACT_BUCKET != '' && vars.KDA_APPLICATION_NAME != '' }}
+        run: |
+          aws s3 sync flink/ "s3://${{ vars.FLINK_ARTIFACT_BUCKET }}/jobs/" --delete
+
+          APP_STATUS="$(aws kinesisanalyticsv2 describe-application \
+            --application-name "${{ vars.KDA_APPLICATION_NAME }}" \
+            --query 'ApplicationDetail.ApplicationStatus' \
+            --output text)"
+
+          if [ "${APP_STATUS}" = "RUNNING" ]; then
+            echo "KDA application is already running."
+          else
+            aws kinesisanalyticsv2 start-application \
+              --application-name "${{ vars.KDA_APPLICATION_NAME }}" \
+              --run-configuration '{}'
+          fi
+
+      - name: Notify Slack
+        if: ${{ success() && env.SLACK_WEBHOOK != '' }}
+        uses: slackapi/slack-github-action@v1.27.0
+        with:
+          payload: |
+            {
+              "text": "IndicAgri-Stream deployed to ${TARGET_ENV} for commit ${IMAGE_TAG}."
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ env.SLACK_WEBHOOK }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK

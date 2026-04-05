@@ -1,0 +1,10 @@
+# CODEOWNERS
+
+* @riju-talk
+
+/.github/workflows/ @riju-talk
+/ci/ @riju-talk
+
+/infra/terraform/ @riju-talk
+/schemas/ @riju-talk
+/dags/ @riju-talk
