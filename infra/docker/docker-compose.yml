@@ -1,0 +1,198 @@
+version: '3.8'
+
+services:
+  # Apache Kafka with Zookeeper
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: agri-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    networks:
+      - agri-network
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: agri-kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_NUM_PARTITIONS: 3
+    networks:
+      - agri-network
+
+  # Schema Registry
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.5.0
+    container_name: agri-schema-registry
+    depends_on:
+      - kafka
+    ports:
+      - "8081:8081"
+    environment:
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka:29092
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+    networks:
+      - agri-network
+
+  # Apache Airflow
+  airflow-webserver:
+    image: apache/airflow:2.8.0
+    container_name: agri-airflow-webserver
+    depends_on:
+      - kafka
+      - postgres
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-ZmVybmV0X2tleV9mb3JfdGVzdGluZ19wdXJwb3Nlc19vbmx5}
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth
+      _PIP_ADDITIONAL_REQUIREMENTS: apache-airflow-providers-http apache-airflow-providers-apache-kafka
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./config/airflow.cfg:/opt/airflow/airflow.cfg
+    command: webserver
+    networks:
+      - agri-network
+
+  airflow-scheduler:
+    image: apache/airflow:2.8.0
+    container_name: agri-airflow-scheduler
+    depends_on:
+      - airflow-webserver
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-ZmVybmV0X2tleV9mb3JfdGVzdGluZ19wdXJwb3Nlc19vbmx5}
+      _PIP_ADDITIONAL_REQUIREMENTS: apache-airflow-providers-http apache-airflow-providers-apache-kafka
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./config/airflow.cfg:/opt/airflow/airflow.cfg
+    command: scheduler
+    networks:
+      - agri-network
+
+  # PostgreSQL for Airflow and feature store
+  postgres:
+    image: postgres:15-alpine
+    container_name: agri-postgres
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - agri-network
+
+  # MinIO (S3-compatible storage)
+  minio:
+    image: minio/minio:RELEASE.2024-01-01T16-36-33Z
+    container_name: agri-minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: admin
+      MINIO_ROOT_PASSWORD: admin123
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - agri-network
+
+  # Redis for caching
+  redis:
+    image: redis:7-alpine
+    container_name: agri-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - agri-network
+
+  # Grafana for observability
+  grafana:
+    image: grafana/grafana:10.2.0
+    container_name: agri-grafana
+    depends_on:
+      - postgres
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_INSTALL_PLUGINS: grafana-clock-panel,grafana-piechart-panel
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./config/grafana/provisioning:/etc/grafana/provisioning
+    networks:
+      - agri-network
+
+  # Prometheus for metrics
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    container_name: agri-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    networks:
+      - agri-network
+
+  # FastAPI application
+  api:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.api
+    container_name: agri-api
+    depends_on:
+      - postgres
+      - redis
+      - kafka
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://airflow:airflow@postgres:5432/airflow
+      REDIS_URL: redis://redis:6379/0
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    volumes:
+      - ./src:/app/src
+    networks:
+      - agri-network
+
+networks:
+  agri-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  minio_data:
+  redis_data:
+  grafana_data:
+  prometheus_data:
